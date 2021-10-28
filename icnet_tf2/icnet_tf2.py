@@ -58,8 +58,8 @@ class ICNetModel(tf.keras.Model):
 
     def build(self, input_shape):
         interp = "bilinear"
-        assert input_shape[1]%16 == 0, "Input tensor height must be dividable by 16. Received {}".format(input_shape[1])
-        assert input_shape[2]%16 == 0, "Input tensor width must be dividable by 16. Received {}".format(input_shape[1])
+        assert input_shape[1] is None or input_shape[1]%16 == 0, "Input tensor height must be dividable by 16. Received {}".format(input_shape[1])
+        assert input_shape[2] is None or input_shape[2]%16 == 0, "Input tensor width must be dividable by 16. Received {}".format(input_shape[2])
 
         self.block1 = tf.keras.Sequential([
             tf.keras.layers.Conv2D(self.f1, 3, 2, use_bias=False, padding='SAME', name='conv1_1_3x3_s2'), # 1/2
@@ -231,10 +231,6 @@ class ICNetModel(tf.keras.Model):
 
         conv5_3_1x1_increase_bn = self.conv5_3(conv5_2_relu)
         conv5_3_relu = tf.keras.layers.ReLU(name='conv5_3/relu')(conv5_2_relu + conv5_3_1x1_increase_bn)
-
-        shape_static = conv5_3_relu.get_shape().as_list()[1:3]
-        hs, ws = shape_static
-        shape_as_tensor = tf.shape(conv5_3_relu)[1:3]
 
         conv5_3_pool1_interp = AvgSPP(1, name='conv5_3_pool1_spp')(conv5_3_relu)
         conv5_3_pool2_interp = AvgSPP(2, name='conv5_3_pool2_spp')(conv5_3_relu)
