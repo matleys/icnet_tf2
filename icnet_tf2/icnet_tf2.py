@@ -1,13 +1,15 @@
 import tensorflow as tf
 from tf_layers import AvgSPP
 
-class ICNetBlock(tf.keras.layers.Layer):
-    def __init__(self, conv12_filters, conv3_filters, dilation_rate, name, do_bn=True):
+class ICNetBlock(tf.keras.layers.Layer): # 1/conv1_stride
+    def __init__(self, conv12_filters, conv3_filters, conv1_stride, dilation_rate, name, skip_block=None, do_bn=True):
         super().__init__(name=name)
         self.conv12_filters = conv12_filters
         self.conv3_filters = conv3_filters
+        self.conv1_stride = conv1_stride
         self.dilation_rate = dilation_rate
         self.do_bn = do_bn
+        self.skip_block = skip_block
     def get_config(self):
         return {
             "conv12_filters": self.conv12_filters,
@@ -16,7 +18,7 @@ class ICNetBlock(tf.keras.layers.Layer):
         }
     def build(self, input_shape):
         self.block = tf.keras.Sequential([
-            tf.keras.layers.Conv2D(self.conv12_filters, 1, use_bias=False, activation=None, name=self.name+'_1x1_reduce'),
+            tf.keras.layers.Conv2D(self.conv12_filters, 1, strides=self.conv1_stride, use_bias=False, activation=None, name=self.name+'_1x1_reduce'),
             BatchNormalization(do=self.do_bn),
             tf.keras.layers.ReLU(name=self.name+'_1x1_reduce_bn'),
             tf.keras.layers.ZeroPadding2D(padding=self.dilation_rate, name=self.name+'padding1'),
@@ -26,8 +28,12 @@ class ICNetBlock(tf.keras.layers.Layer):
             tf.keras.layers.Conv2D(self.conv3_filters, 1, use_bias=False, activation=None, name=self.name+'_1x1_increase'),
             BatchNormalization(do=self.do_bn, name=self.name+'_1x1_increase_bn'),
         ])
+        self.skip_block = self.skip_block or tf.keras.layers.Lambda(lambda x:x)
+        self.relu = tf.keras.layers.ReLU(name=self.name+'/relu')
     def call(self, inputs):
-        return self.block(inputs)
+        output = self.block(inputs)
+        skip = self.skip_block(inputs)
+        return self.relu(output + skip)
 
 class BatchNormalization(tf.keras.layers.BatchNormalization):
     def __init__(self, do=True, *args, **kwargs):
@@ -72,62 +78,51 @@ class ICNetModel(tf.keras.Model):
             BatchNormalization(do=self.do_bn, name='conv1_3_3x3_bn'),
             tf.keras.layers.ReLU(),
             tf.keras.layers.ZeroPadding2D(),
-            tf.keras.layers.MaxPool2D(3, 2, name='pool1_3x3_s2'),
-        ])
-        self.block2 = tf.keras.Sequential([
+            tf.keras.layers.MaxPool2D(3, 2, name='pool1_3x3_s2'), # 1/2
+        ]) # 1/4
+
+        skip_block2 = tf.keras.Sequential([
             tf.keras.layers.Conv2D(self.f4, 1, 1, use_bias=False, padding='VALID', name='conv2_1_1x1_proj'),
             BatchNormalization(do=self.do_bn, name='conv2_1_1x1_proj_bn')
         ])
-        self.conv2_1 = ICNetBlock(self.f1, self.f4, dilation_rate=1, do_bn=self.do_bn, name='conv2_1')
-        self.conv2_2 = ICNetBlock(self.f1, self.f4, dilation_rate=1, do_bn=self.do_bn, name='conv2_2')
-        self.conv2_3 = ICNetBlock(self.f1, self.f4, dilation_rate=1, do_bn=self.do_bn, name='conv2_3')
+        self.conv2_1 = ICNetBlock(self.f1, self.f4, conv1_stride=1, dilation_rate=1, do_bn=self.do_bn, skip_block=skip_block2, name='conv2_1')
+        self.conv2_2 = ICNetBlock(self.f1, self.f4, conv1_stride=1, dilation_rate=1, do_bn=self.do_bn, name='conv2_2')
+        self.conv2_3 = ICNetBlock(self.f1, self.f4, conv1_stride=1, dilation_rate=1, do_bn=self.do_bn, name='conv2_3')
 
-        self.block3 = tf.keras.Sequential([
+        skip_block3 = tf.keras.Sequential([
             tf.keras.layers.Conv2D(self.f8, 1, strides=2, use_bias=False, activation=None, name='conv3_1_1x1_proj'),
             BatchNormalization(do=self.do_bn, name='conv3_1_1x1_proj_bn')
         ])
+        self.conv3_1 = ICNetBlock(self.f2, self.f8, conv1_stride=2, dilation_rate=1, do_bn=self.do_bn, skip_block=skip_block3, name='conv2_1') # 1/2
+        self.conv3_2 = ICNetBlock(self.f2, self.f8, conv1_stride=1, dilation_rate=1, do_bn=self.do_bn, name='conv3_2')
+        self.conv3_3 = ICNetBlock(self.f2, self.f8, conv1_stride=1, dilation_rate=1, do_bn=self.do_bn, name='conv3_3')
+        self.conv3_4 = ICNetBlock(self.f2, self.f8, conv1_stride=1, dilation_rate=1, do_bn=self.do_bn, name='conv3_4')
 
-        self.block4 = tf.keras.Sequential([
-            tf.keras.layers.Conv2D(self.f2, 1, strides=2, use_bias=False, activation=None, name="conv3_1"+'_1x1_reduce'),
-            BatchNormalization(do=self.do_bn),
-            tf.keras.layers.ReLU(name="conv3_1"+'_1x1_reduce_bn'),
-            tf.keras.layers.ZeroPadding2D(padding=1, name="conv3_1"+'padding1'),
-            tf.keras.layers.Conv2D(self.f2, 3, dilation_rate=1, use_bias=False, activation=None, name="conv3_1"+'_3x3'),
-            BatchNormalization(do=self.do_bn),
-            tf.keras.layers.ReLU(name="conv3_1"+'_3x3_bn'),
-            tf.keras.layers.Conv2D(self.f8, 1, use_bias=False, activation=None, name="conv3_1"+'_1x1_increase'),
-            BatchNormalization(do=self.do_bn, name="conv3_1"+'_1x1_increase_bn'),
-        ])
-        self.conv3_2 = ICNetBlock(self.f2, self.f8, dilation_rate=1, do_bn=self.do_bn, name='conv3_2')
-        self.conv3_3 = ICNetBlock(self.f2, self.f8, dilation_rate=1, do_bn=self.do_bn, name='conv3_3')
-        self.conv3_4 = ICNetBlock(self.f2, self.f8, dilation_rate=1, do_bn=self.do_bn, name='conv3_4')
-
-        self.block5 = tf.keras.Sequential([
+        skip_block4 = tf.keras.Sequential([
             tf.keras.layers.Conv2D(self.f16, 1, 1, use_bias=False, activation=None, name='conv4_1_1x1_proj'),
             BatchNormalization(do=self.do_bn, name='conv4_1_1x1_proj_bn')
         ])
-        self.conv4_1 = ICNetBlock(self.f4, self.f16, dilation_rate=2, do_bn=self.do_bn, name='conv4_1')
-        self.conv4_2 = ICNetBlock(self.f4, self.f16, dilation_rate=2, do_bn=self.do_bn, name='conv4_2')
-        self.conv4_3 = ICNetBlock(self.f4, self.f16, dilation_rate=2, do_bn=self.do_bn, name='conv4_3')
-        self.conv4_4 = ICNetBlock(self.f4, self.f16, dilation_rate=2, do_bn=self.do_bn, name='conv4_4')
-        self.conv4_5 = ICNetBlock(self.f4, self.f16, dilation_rate=2, do_bn=self.do_bn, name='conv4_5')
-        self.conv4_6 = ICNetBlock(self.f4, self.f16, dilation_rate=2, do_bn=self.do_bn, name='conv4_6')
+        self.conv4_1 = ICNetBlock(self.f4, self.f16, conv1_stride=1, dilation_rate=2, do_bn=self.do_bn, skip_block=skip_block4, name='conv4_1')
+        self.conv4_2 = ICNetBlock(self.f4, self.f16, conv1_stride=1, dilation_rate=2, do_bn=self.do_bn, name='conv4_2')
+        self.conv4_3 = ICNetBlock(self.f4, self.f16, conv1_stride=1, dilation_rate=2, do_bn=self.do_bn, name='conv4_3')
+        self.conv4_4 = ICNetBlock(self.f4, self.f16, conv1_stride=1, dilation_rate=2, do_bn=self.do_bn, name='conv4_4')
+        self.conv4_5 = ICNetBlock(self.f4, self.f16, conv1_stride=1, dilation_rate=2, do_bn=self.do_bn, name='conv4_5')
+        self.conv4_6 = ICNetBlock(self.f4, self.f16, conv1_stride=1, dilation_rate=2, do_bn=self.do_bn, name='conv4_6')
 
-        self.block6 = tf.keras.Sequential([
+        skip_block5 = tf.keras.Sequential([
             tf.keras.layers.Conv2D(self.f32, 1, 1, use_bias=False, activation=None, name='conv5_1_1x1_proj'),
             BatchNormalization(do=self.do_bn, name='conv5_1_1x1_proj_bn')
         ])
-
-        self.conv5_1 = ICNetBlock(self.f8, self.f32, dilation_rate=4, do_bn=self.do_bn, name='conv5_1')
-        self.conv5_2 = ICNetBlock(self.f8, self.f32, dilation_rate=4, do_bn=self.do_bn, name='conv5_2')
-        self.conv5_3 = ICNetBlock(self.f8, self.f32, dilation_rate=4, do_bn=self.do_bn, name='conv5_3')
+        self.conv5_1 = ICNetBlock(self.f8, self.f32, conv1_stride=1, dilation_rate=4, do_bn=self.do_bn, skip_block=skip_block5, name='conv5_1')
+        self.conv5_2 = ICNetBlock(self.f8, self.f32, conv1_stride=1, dilation_rate=4, do_bn=self.do_bn, name='conv5_2')
+        self.conv5_3 = ICNetBlock(self.f8, self.f32, conv1_stride=1, dilation_rate=4, do_bn=self.do_bn, name='conv5_3')
 
         self.block7 = tf.keras.Sequential([
             tf.keras.layers.Conv2D(self.f8, 1, 1, use_bias=False, activation=None, name='conv5_4_k1'),
             BatchNormalization(do=self.do_bn),
             tf.keras.layers.ReLU(name='conv5_4_k1_bn'),
             tf.keras.layers.UpSampling2D(2, interpolation=interp, name='conv5_4_interp')
-        ])
+        ]) # 2
 
         self.block8 = tf.keras.Sequential([
             tf.keras.layers.ZeroPadding2D(padding=2),
@@ -143,7 +138,7 @@ class ICNetModel(tf.keras.Model):
         self.block10 = tf.keras.Sequential([
             tf.keras.layers.ReLU(name='sub24_sum/relu'),
             tf.keras.layers.UpSampling2D(2, interpolation=interp, name='sub24_sum_interp')
-        ])
+        ]) # 2
 
         self.block11 = tf.keras.Sequential([
             tf.keras.layers.ZeroPadding2D(padding=2),
@@ -152,85 +147,53 @@ class ICNetModel(tf.keras.Model):
         ])
 
         self.block12 = tf.keras.Sequential([
-            tf.keras.layers.Conv2D(self.f1, 3, strides=2, use_bias=False, padding='SAME', activation=None, name='conv1_sub1'),
+            tf.keras.layers.Conv2D(self.f1, 3, strides=2, use_bias=False, padding='SAME', activation=None, name='conv1_sub1'), # 1/2
             BatchNormalization(do=self.do_bn),
             tf.keras.layers.ReLU(),
-            tf.keras.layers.Conv2D(self.f1, 3, strides=2, use_bias=False, padding='SAME', activation=None, name='conv2_sub1'),
+            tf.keras.layers.Conv2D(self.f1, 3, strides=2, use_bias=False, padding='SAME', activation=None, name='conv2_sub1'), # 1/2
             BatchNormalization(do=self.do_bn),
             tf.keras.layers.ReLU(),
-            tf.keras.layers.Conv2D(self.f2, 3, strides=2, use_bias=False, padding='SAME', activation=None, name='conv3_sub1'),
+            tf.keras.layers.Conv2D(self.f2, 3, strides=2, use_bias=False, padding='SAME', activation=None, name='conv3_sub1'), # 1/2
             BatchNormalization(do=self.do_bn),
             tf.keras.layers.ReLU(),
             tf.keras.layers.Conv2D(self.f4, 1, 1, use_bias=False, padding='VALID', activation=None, name='conv3_sub1_proj'),
             BatchNormalization(do=self.do_bn, name='conv3_sub1_proj_bn'),
-            tf.keras.layers.UpSampling2D(2, interpolation=interp) # added
-        ])
+            tf.keras.layers.UpSampling2D(2, interpolation=interp) # 2 (gva added)
+        ]) # 1/4
 
         self.block13 = tf.keras.Sequential([
             tf.keras.layers.ReLU(),
             tf.keras.layers.UpSampling2D(2, interpolation=interp, name='sub12_sum_interp')
-        ])
+        ]) # 2
 
     def call(self, inputs):
         half_inputs = inputs if self.skip_first_bilinear_resize else tf.image.resize(inputs, size=tf.shape(inputs)[1:3]//2, method=tf.image.ResizeMethod.BILINEAR)
         pool1_3x3_s2 = self.block1(half_inputs)
-        conv2_1_1x1_proj_bn = self.block2(pool1_3x3_s2)
 
-        conv2_1_1x1_increase_bn = self.conv2_1(pool1_3x3_s2)
-        conv2_1_relu = tf.keras.layers.ReLU(name='conv2_1/relu')(conv2_1_1x1_proj_bn + conv2_1_1x1_increase_bn)
-        conv2_2_1x1_increase_bn = self.conv2_2(conv2_1_relu)
-        conv2_2_relu = tf.keras.layers.ReLU(name='conv2_2/relu')(conv2_1_relu + conv2_2_1x1_increase_bn)
-        conv2_3_1x1_increase_bn = self.conv2_3(conv2_2_relu)
+        conv2_1_relu = self.conv2_1(pool1_3x3_s2)
+        conv2_2_relu = self.conv2_2(conv2_1_relu)
+        conv2_3_relu = self.conv2_3(conv2_2_relu)
 
-        conv2_3_relu = tf.keras.layers.ReLU(name='conv2_3/relu')(conv2_2_relu + conv2_3_1x1_increase_bn)
-        conv3_1_1x1_proj_bn = self.block3(conv2_3_relu)
+        conv3_1_relu = self.conv3_1(conv2_3_relu)
 
-        conv3_1_1x1_increase_bn = self.block4(conv2_3_relu)
-
-        conv3_1_relu = tf.keras.layers.ReLU(name='conv3_1/relu')(conv3_1_1x1_proj_bn + conv3_1_1x1_increase_bn)
-        #conv3_1_sub4 = tf.keras.layers.MaxPool2D(2)(conv3_1_relu)
+        #conv3_1_sub4 = tf.keras.layers.MaxPool2D(2)(conv3_1_relu) # replaced by bilinear resize here below
         size = tf.shape(conv3_1_relu)[1:3]//2
         conv3_1_sub4 = tf.image.resize(conv3_1_relu, size=size, method=tf.image.ResizeMethod.BILINEAR)
 
-        conv3_2_1x1_increase_bn = self.conv3_2(conv3_1_sub4)
-        conv3_2_relu = tf.keras.layers.ReLU(name='conv3_2/relu')(conv3_1_sub4 + conv3_2_1x1_increase_bn)
+        conv3_2_relu = self.conv3_2(conv3_1_sub4)
+        conv3_3_relu = self.conv3_3(conv3_2_relu)
+        conv3_4_relu = self.conv3_4(conv3_3_relu)
 
-        conv3_3_1x1_increase_bn = self.conv3_3(conv3_2_relu)
-        conv3_3_relu = tf.keras.layers.ReLU(name='conv3_3/relu')(conv3_2_relu + conv3_3_1x1_increase_bn)
+        conv4_1_relu = self.conv4_1(conv3_4_relu)
+        conv4_2_relu = self.conv4_2(conv4_1_relu)
+        conv4_3_relu = self.conv4_3(conv4_2_relu)
+        conv4_4_relu = self.conv4_4(conv4_3_relu)
+        conv4_5_relu = self.conv4_5(conv4_4_relu)
+        conv4_6_relu = self.conv4_6(conv4_5_relu)
 
-        conv3_4_1x1_increase_bn = self.conv3_4(conv3_3_relu)
-        conv3_4_relu = tf.keras.layers.ReLU(name='conv3_4/relu')(conv3_3_relu + conv3_4_1x1_increase_bn)
-
-        conv4_1_1x1_proj_bn = self.block5(conv3_4_relu)
-
-        conv4_1_1x1_increase_bn = self.conv4_1(conv3_4_relu)
-        conv4_1_relu = tf.keras.layers.ReLU(name='conv4_1/relu')(conv4_1_1x1_proj_bn + conv4_1_1x1_increase_bn)
-
-        conv4_2_1x1_increase_bn = self.conv4_2(conv4_1_relu)
-        conv4_2_relu = tf.keras.layers.ReLU(name='conv4_2/relu')(conv4_1_relu + conv4_2_1x1_increase_bn)
-
-        conv4_3_1x1_increase_bn = self.conv4_3(conv4_2_relu)
-        conv4_3_relu = tf.keras.layers.ReLU(name='conv4_3/relu')(conv4_2_relu + conv4_3_1x1_increase_bn)
-
-        conv4_4_1x1_increase_bn = self.conv4_4(conv4_3_relu)
-        conv4_4_relu = tf.keras.layers.ReLU(name='conv4_4/relu')(conv4_3_relu + conv4_4_1x1_increase_bn)
-
-        conv4_5_1x1_increase_bn = self.conv4_5(conv4_4_relu)
-        conv4_5_relu = tf.keras.layers.ReLU(name='conv4_5/relu')(conv4_4_relu + conv4_5_1x1_increase_bn)
-
-        conv4_6_1x1_increase_bn = self.conv4_6(conv4_5_relu)
-        conv4_6_relu = tf.keras.layers.ReLU(name='conv4_6/relu')(conv4_5_relu + conv4_6_1x1_increase_bn)
-
-        conv5_1_1x1_proj_bn = self.block6(conv4_6_relu)
-
-        conv5_1_1x1_increase_bn = self.conv5_1(conv4_6_relu)
-        conv5_1_relu = tf.keras.layers.ReLU(name='conv5_1/relu')(conv5_1_1x1_proj_bn + conv5_1_1x1_increase_bn)
-
-        conv5_2_1x1_increase_bn = self.conv5_2(conv5_1_relu)
-        conv5_2_relu = tf.keras.layers.ReLU(name='conv5_2/relu')(conv5_1_relu + conv5_2_1x1_increase_bn)
-
-        conv5_3_1x1_increase_bn = self.conv5_3(conv5_2_relu)
-        conv5_3_relu = tf.keras.layers.ReLU(name='conv5_3/relu')(conv5_2_relu + conv5_3_1x1_increase_bn)
+        conv5_1_relu = self.conv5_1(conv4_6_relu)
+        conv5_2_relu = self.conv5_2(conv5_1_relu)
+        conv5_3_relu = self.conv5_3(conv5_2_relu)
 
         conv5_3_pool1_interp = AvgSPP(1, name='conv5_3_pool1_spp')(conv5_3_relu)
         conv5_3_pool2_interp = AvgSPP(2, name='conv5_3_pool2_spp')(conv5_3_relu)
