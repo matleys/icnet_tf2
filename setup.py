@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 import sys
 
 platform_specific_packages = {
-    "darwin": ["tensorflow-macos", "tensorflow-metal"],
+    "darwin": ["tensorflow>=2.4"],
     "linux": ["tensorflow>=2.4"],
     "cywin": ["tensorflow>=2.4"],
     "win3D": ["tensorflow>=2.4"],
